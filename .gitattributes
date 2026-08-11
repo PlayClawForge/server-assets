@@ -1,0 +1,6 @@
+# keep the generator immune to CRLF normalisation on Windows boxes
+*.py text eol=lf
+*.gif binary
+*.png binary
+*.ttf binary
+*.mp3 binary

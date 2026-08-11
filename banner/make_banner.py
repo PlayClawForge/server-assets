@@ -1,101 +1,105 @@
 #!/usr/bin/env python3
-"""TBI banner updater — edits text zones of tbi-banner-animated.gif, preserves design.
-Commit this to server-assets/banner/ so the banner has code from now on.
-To change features later: edit the lists below, rerun, replace the GIF in the repo root."""
-from PIL import Image, ImageDraw, ImageFont, ImageSequence
-import os
+"""TBI FiveM browser banner generator — v2 (self-contained).
 
-SRC = "/home/claude/server-assets/tbi-banner-animated.gif"
-OUT = "/mnt/user-data/outputs/tbi-banner-animated.gif"
-FRD = "/home/claude/frames"          # extracted originals f00..f29 already on disk
+Run from anywhere:  python3 banner/make_banner.py
+Reads  : banner/frames/f00..f29.png  (pristine frames of the original design — committed)
+Writes : tbi-banner-animated.gif     (repo root — the live banner via raw URL hot-swap)
+Font   : banner/DejaVuSans-Bold.ttf  (bundled, redistributable) with system fallback.
 
-# ---- editable content -------------------------------------------------------
-PAGE1_KEEP = True                     # original economy bullets stay as page 1
-PAGE2_BULLETS = ["MUSIC CITY  \u2014  RECORDING STUDIO LIVE",
-                 "STAGE NIGHTS  \u00b7  DRONES OVER THE CITY"]
-RIGHT_TOP, RIGHT_BOT = "INVITE-ONLY", "BETA LIVE"   # replaces FOUNDING / CREW OPEN
-PAGE1_HOLD_MS, PAGE2_HOLD_MS, XFADE_FRAMES = 900, 2000, 3
-# ----------------------------------------------------------------------------
+To change the banner text: edit the CONFIG block, rerun, commit the new GIF.
+The design (wordmark, chevrons, subline, chart animation) is carried by the source
+frames and is never redrawn — only the two text zones below are repainted.
+v2 fixes vs the first committed version: correct right-zone bounds (v1's detector
+ate the chart arrow), true fade-in frame (17, not 0), fitted copy with a hard
+width assertion so text can never collide with the chart again.
+"""
+from PIL import Image, ImageDraw, ImageFont
+from pathlib import Path
+import sys
 
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+# ── CONFIG — edit these, rerun ──────────────────────────────────────────────
+PAGE2_LINE1 = "RECORDING STUDIO  \u00b7  STAGE NIGHTS"
+PAGE2_LINE2 = "MUSIC CITY  \u00b7  DRONES OVERHEAD"
+RIGHT_TOP   = "INVITE-ONLY"        # at public launch e.g. "PUBLIC LAUNCH"
+RIGHT_BOT   = "BETA LIVE"          #                    e.g. "JOIN THE CITY"
+PAGE1_HOLD_MS, PAGE2_HOLD_MS = 900, 2000
+# ────────────────────────────────────────────────────────────────────────────
 
-frames = [Image.open(f"{FRD}/f{i:02d}.png").convert("RGB") for i in range(30)]
-W, H = frames[0].size
-last = frames[-1]
+HERE  = Path(__file__).resolve().parent          # .../banner
+ROOT  = HERE.parent                              # repo root
+OUT   = ROOT / "tbi-banner-animated.gif"
+FRAMES= HERE / "frames"
 
-def find_zone(img, x0, x1, test):
-    """bbox of pixels matching test() inside x-range."""
-    px, xs, ys = img.load(), [], []
-    for y in range(H):
-        for x in range(x0, x1):
-            if test(px[x, y]): xs.append(x); ys.append(y)
-    return (min(xs), min(ys), max(xs), max(ys)) if xs else None
-
-teal   = lambda p: p[1] > 150 and p[2] > 130 and p[0] < 120          # bullet text
-bright = lambda p: sum(p) > 420 or (p[0] > 200 and p[1] > 110 and p[2] < 90)  # white/orange
-
-bz = find_zone(last, 950, 1480, teal)     # bullets zone on the final frame
-rz = find_zone(last, 1600, W,   bright)   # right stacked text zone
-assert bz and rz, "zone detection failed - inspect frames"
-pad = 8
-bz = (bz[0]-pad, bz[1]-pad, bz[2]+pad, bz[3]+pad)
-rz = (rz[0]-pad, rz[1]-pad, rz[2]+pad, rz[3]+pad)
-print("bullet zone:", bz, " right zone:", rz)
-
-# clean background plates from an early frame (zones empty there)
-plate = frames[1]
-b_plate, r_plate = plate.crop(bz), plate.crop(rz)
-
-# find the frame where the right text first appears (to patch from there on)
-def zone_differs(i, zone, ref):
-    a = frames[i].crop(zone); import hashlib
-    return a.tobytes() != ref.tobytes()
-right_start = next((i for i in range(30) if zone_differs(i, rz, r_plate)), 20)
-print("right text first appears at frame", right_start)
-
-# text helpers — tracked caps to match the house style
+# geometry — measured against the source frames (1865x108); do not change
+# without re-measuring: rz was the v1 bug (oversized box ate the chart arrow).
+BZ = (1015, 18, 1495, 105)     # bullet text zone (right edge stops before chart)
+RZ = (1665, 27, 1814, 81)      # right stacked-text zone (FOUNDING -> beta status)
+RIGHT_START = 17               # frame where right text fades in (matches original)
+CHART_X = 1520                 # hard stop: no bullet text may cross this
 TEAL, WHITE, ORANGE = (94, 224, 196), (245, 245, 245), (255, 148, 54)
-def tracked(draw, xy, s, font, fill, track=2):
+
+def load_font(size):
+    for p in (HERE / "DejaVuSans-Bold.ttf",
+              Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+              Path("C:/Windows/Fonts/arialbd.ttf")):
+        if p.exists():
+            return ImageFont.truetype(str(p), size)
+    sys.exit("no usable bold font found — keep DejaVuSans-Bold.ttf next to this script")
+
+fS, fR = load_font(17), load_font(19)
+
+def tracked(d, xy, s, f, fill, t=2):
     x, y = xy
     for ch in s:
-        draw.text((x, y), ch, font=font, fill=fill)
-        x += draw.textlength(ch, font=font) + track
-def tracked_w(draw, s, font, track=2):
-    return sum(draw.textlength(c, font=font) + track for c in s) - track
+        d.text((x, y), ch, font=f, fill=fill)
+        x += d.textlength(ch, font=f) + t
 
-fS = ImageFont.truetype(FONT, 17)   # bullet size ~ original
-fR = ImageFont.truetype(FONT, 19)   # right stack
+def tw(d, s, f, t=2):
+    return sum(d.textlength(c, font=f) + t for c in s) - t
+
+frames = [Image.open(FRAMES / f"f{i:02d}.png").convert("RGB") for i in range(30)]
+assert frames[0].size == (1865, 108), "unexpected source frame size"
+b_plate = frames[1].crop(BZ)          # clean background plates from an early frame
+r_plate = frames[1].crop(RZ)
+
+_meas = ImageDraw.Draw(frames[0].copy())
+MAXW = CHART_X - (BZ[0] + 22) - 12
+for s in (PAGE2_LINE1, PAGE2_LINE2):
+    w = tw(_meas, s, fS)
+    assert w <= MAXW, f"line too wide for the zone: {s!r} ({w:.0f}px > {MAXW}px) — shorten it"
+
+def draw_right(img, alpha=1.0):
+    d = ImageDraw.Draw(img)
+    cx = (RZ[0] + RZ[2]) // 2
+    col = lambda c: tuple(int(v * alpha) for v in c)
+    tracked(d, (cx - tw(d, RIGHT_TOP, fR) // 2, 31), RIGHT_TOP, fR, col(WHITE))
+    tracked(d, (cx - tw(d, RIGHT_BOT, fR) // 2, 57), RIGHT_BOT, fR, col(ORANGE))
 
 def draw_bullets(img, lines):
     d = ImageDraw.Draw(img)
-    ys = [bz[1] + 6, bz[1] + 6 + 30]
-    for s, y in zip(lines, ys):
-        d.ellipse((bz[0]+2, y+6, bz[0]+9, y+13), fill=TEAL)
-        tracked(d, (bz[0] + 18, y), s, fS, TEAL, track=2)
+    for s, y in zip(lines, (30, 62)):
+        d.ellipse((BZ[0] + 4, y + 6, BZ[0] + 11, y + 13), fill=TEAL)
+        tracked(d, (BZ[0] + 22, y), s, fS, TEAL)
 
-def draw_right(img):
-    d = ImageDraw.Draw(img)
-    cx = (rz[0] + rz[2]) // 2
-    for s, y, col in [(RIGHT_TOP, rz[1] + 4, WHITE), (RIGHT_BOT, rz[1] + 4 + 26, ORANGE)]:
-        tracked(d, (cx - tracked_w(d, s, fR, 2) // 2, y), s, fR, col, 2)
-
-# --- build sequence ---------------------------------------------------------
 out, durs = [], []
-for i, fr in enumerate(frames[:29]):                 # original growth animation
+for i, fr in enumerate(frames[:29]):                       # original growth animation
     f = fr.copy()
-    if i >= right_start:                             # swap FOUNDING->INVITE-ONLY
-        f.paste(r_plate, rz); draw_right(f)
+    if i >= RIGHT_START:                                   # beta-status text, original fade
+        f.paste(r_plate, RZ)
+        draw_right(f, min(1.0, (i - RIGHT_START + 1) / 4))
     out.append(f); durs.append(100)
 
-hold1 = frames[29].copy(); hold1.paste(r_plate, rz); draw_right(hold1)
-out.append(hold1); durs.append(PAGE1_HOLD_MS)        # page-1 hold (economy bullets)
+hold1 = frames[29].copy()
+hold1.paste(r_plate, RZ); draw_right(hold1)
+out.append(hold1); durs.append(PAGE1_HOLD_MS)              # page 1: economy bullets
 
-page2 = hold1.copy(); page2.paste(b_plate, bz); draw_bullets(page2, PAGE2_BULLETS)
-for k in range(1, XFADE_FRAMES + 1):                 # short crossfade to page 2
-    out.append(Image.blend(hold1, page2, k / (XFADE_FRAMES + 1))); durs.append(80)
-out.append(page2); durs.append(PAGE2_HOLD_MS)        # page-2 hold (music/drones)
+page2 = hold1.copy()
+page2.paste(b_plate, (BZ[0], BZ[1]))
+draw_bullets(page2, [PAGE2_LINE1, PAGE2_LINE2])
+for k in range(1, 4):                                      # crossfade
+    out.append(Image.blend(hold1, page2, k / 4)); durs.append(80)
+out.append(page2); durs.append(PAGE2_HOLD_MS)              # page 2: music / drones
 
 q = [f.quantize(colors=256, method=Image.MEDIANCUT) for f in out]
 q[0].save(OUT, save_all=True, append_images=q[1:], duration=durs, loop=0, optimize=True)
-print("frames:", len(out), "| total loop:", sum(durs) / 1000, "s | bytes:", os.path.getsize(OUT))
-page2.save("/home/claude/proof_page2.png"); hold1.save("/home/claude/proof_page1.png")
+print(f"wrote {OUT.name}: {len(out)} frames, {sum(durs)/1000:.2f}s loop, {OUT.stat().st_size} bytes")
